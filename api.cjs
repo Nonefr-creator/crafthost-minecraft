@@ -6,22 +6,48 @@ const rateLimit = require("express-rate-limit");
 const { spawn } = require('child_process');
 const serverManager = require("./serverManager.cjs");
 const auth = require("./auth.cjs");
+const state = require("./state.js"); 
 const path = require('path');
+const fs = require('fs');
+const os = require('os');
 
-function authenticate(req, res, next) {
-  const h = req.headers.authorization || req.headers.Authorization;
-  if (!h || !h.startsWith('Bearer ')) return res.status(401).json({ ok: false, error: 'Unauthorized' });
-  const token = h.slice(7);
-  const payload = auth.verify(token);
-  if (!payload) return res.status(401).json({ ok: false, error: 'Invalid token' });
-  req.user = payload;
-  next();
-}
+// 🔥 İNATÇI HATAYI BİTİREN SATIR: Kimlik doğrulama motorunu sisteme tanıttık!
+const { authenticate } = auth;
 
-function getPayload(req) {
-  const h = req.headers.authorization || req.headers.Authorization;
-  if (!h || !h.startsWith('Bearer ')) return null;
-  return auth.verify(h.slice(7));
+// 🚀 SIFIR TERMİNAL: Kullanıcının ruhu bile duymadan masaüstüne otomatik başlatıcı oluşturan fonksiyon
+function autoCreateDesktopShortcut() {
+  try {
+    const desktopPath = path.join(os.homedir(), 'Desktop');
+    const batPath = path.join(desktopPath, 'CraftHost-Hizli-Baslat.bat');
+    
+    if (fs.existsSync(batPath)) return;
+
+    const rootPath = path.join(__dirname, '..');
+
+    const content = `@echo off
+title CraftHost Otomatik Baslatici
+echo ==========================================
+echo 🚀 CraftHost Sistemleri Atesleniyor...
+echo ==========================================
+
+echo ⚙️ Arka plan API sunucusu aciliyor...
+start "CraftHost Backend API" cmd /k "cd /d ${__dirname} && node api.cjs"
+
+timeout /t 3 /nobreak >nul
+
+echo 🖥️ Ön yüz arayüzü canlandiriliyor...
+start "CraftHost Ön Yüz" cmd /k "cd /d ${rootPath} && npm run dev"
+
+echo 🎉 Tüm sistemler basariyla tetiklendi! Bu pencereyi kapatabilirsiniz.
+timeout /t 2 >nul
+exit
+`;
+
+    fs.writeFileSync(batPath, content, 'utf8');
+    console.log('✨ [Otomasyon] Masaüstü hızlı başlatıcı kısayolu otomatik oluşturuldu!');
+  } catch (e) {
+    console.warn('⚠️ [Otomasyon] Masaüstü kısayolu oluşturulamadı:', e.message);
+  }
 }
 
 const app = express();
@@ -32,9 +58,8 @@ app.use(helmet());
 app.set('trust proxy', 1);
 app.use(rateLimit({ windowMs: 60 * 1000, max: 120 }));
 
-// Serve frontend build if present
 const distPath = path.join(__dirname, '..', 'dist');
-if (require('fs').existsSync(distPath)) {
+if (fs.existsSync(distPath)) {
   app.use(express.static(distPath));
   app.get('/', (req, res) => res.sendFile(path.join(distPath, 'index.html')));
 }
@@ -42,22 +67,23 @@ if (require('fs').existsSync(distPath)) {
 const CONFIG_FILE = path.join(__dirname, 'config.json');
 
 function readConfig() {
-  try { return JSON.parse(require('fs').readFileSync(CONFIG_FILE, 'utf8') || '{}'); } catch (e) { return {}; }
+  try { return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8') || '{}'); } catch (e) { return {}; }
 }
 
 function writeConfig(obj) {
-  try { require('fs').writeFileSync(CONFIG_FILE, JSON.stringify(obj, null, 2), 'utf8'); return true; } catch (e) { return false; }
+  try { fs.writeFileSync(CONFIG_FILE, JSON.stringify(obj, null, 2), 'utf8'); return true; } catch (e) { return false; }
 }
 
 app.post('/config', authenticate, async (req, res) => {
-  // body: { CLOUDFLARE_TOKEN, CLOUDFLARE_ZONE, NGROK_AUTHTOKEN }
   const body = req.body || {};
   const cfg = readConfig();
-  ['CLOUDFLARE_TOKEN','CLOUDFLARE_ZONE','NGROK_AUTHTOKEN'].forEach(k => { if (body[k]) cfg[k] = body[k]; });
+
+  if (body.CLOUDFLARE_TOKEN !== undefined) cfg.CLOUDFLARE_TOKEN = body.CLOUDFLARE_TOKEN;
+  if (body.CLOUDFLARE_ZONE !== undefined) cfg.CLOUDFLARE_ZONE = body.CLOUDFLARE_ZONE;
+  if (body.RECAPTCHA_SECRET !== undefined) cfg.RECAPTCHA_SECRET = body.RECAPTCHA_SECRET;
+
   const ok = writeConfig(cfg);
   if (ok) {
-    // update process.env for immediate use
-    if (cfg.NGROK_AUTHTOKEN) process.env.NGROK_AUTHTOKEN = cfg.NGROK_AUTHTOKEN;
     if (cfg.CLOUDFLARE_TOKEN) process.env.CLOUDFLARE_TOKEN = cfg.CLOUDFLARE_TOKEN;
     if (cfg.CLOUDFLARE_ZONE) process.env.CLOUDFLARE_ZONE = cfg.CLOUDFLARE_ZONE;
     return res.json({ ok: true, config: cfg });
@@ -76,9 +102,19 @@ app.post("/start", authenticate, async (req, res) => {
     const sharedWith = req.body.sharedWith || [];
     const plugins = req.body.plugins || [];
     const onlineMode = typeof req.body.onlineMode === 'boolean' ? req.body.onlineMode : false;
-    const result = await serverManager.startServer({ ownerId, ram, sharedWith, plugins, onlineMode, name: req.body.name, software: req.body.software, version: req.body.version });
+    
+    const subdomain = req.body.subdomain || ownerId; 
+    const serverName = req.body.name || `${ownerId}'s Server`;
+    const version = req.body.version || '26.1.2';
+
+    const result = await serverManager.startServer({ 
+      ownerId, ram, sharedWith, plugins, onlineMode, name: serverName, software: 'Paper', version, subdomain 
+    });
+    
+    state.setRunning(ownerId, true);
+
     const server = serverManager.getServer(ownerId) || {};
-    res.json(Object.assign(result, { host: server.host || null, port: server.tunnelPort || server.port || null }));
+    res.json(Object.assign(result, { host: server.host || null, port: server.tunnelPort || server.port || null, state: state.getState(ownerId) }));
   } catch (err) {
     res.json({ ok: false, error: err.message });
   }
@@ -88,9 +124,15 @@ app.post('/quick', async (req, res) => {
   try {
     const ownerId = 'public';
     const ram = req.body?.ram || 2;
-    const result = await serverManager.startServer({ ownerId, ram, sharedWith: [], onlineMode: false, name: 'Genel Sunucu', software: 'Paper', version: '1.21.8' });
+    
+    const result = await serverManager.startServer({ 
+      ownerId, ram, sharedWith: [], onlineMode: false, name: 'Genel Sunucu', software: 'Paper', version: '26.1.2', subdomain: 'play' 
+    });
+    
+    state.setRunning(ownerId, true);
+
     const server = serverManager.getServer(ownerId) || {};
-    return res.json(Object.assign(result, { host: server.host || null, port: server.tunnelPort || server.port || null, domain: server.domain }));
+    return res.json(Object.assign(result, { host: server.host || null, port: server.tunnelPort || server.port || null, domain: server.domain, state: state.getState(ownerId) }));
   } catch (err) {
     return res.json({ ok: false, error: err.message });
   }
@@ -98,8 +140,12 @@ app.post('/quick', async (req, res) => {
 
 app.post("/stop", authenticate, async (req, res) => {
   try {
-    await serverManager.stopServer({ userRequested: true });
-    res.json({ ok: true });
+    const ownerId = req.user.username || req.user.id || 'guest';
+    await serverManager.stopServer({ ownerId, userRequested: true });
+    
+    state.setRunning(ownerId, false);
+
+    res.json({ ok: true, state: state.getState(ownerId) });
   } catch (err) {
     res.json({ ok: false, error: err.message });
   }
@@ -128,7 +174,7 @@ app.post('/register', async (req, res) => {
       const https = require('https');
       const postData = `secret=${encodeURIComponent(cfg.RECAPTCHA_SECRET)}&response=${encodeURIComponent(captchaToken)}`;
       const options = {
-        hostname: 'www.google.com',
+        hostname: '://google.com',
         path: '/recaptcha/api/siteverify',
         method: 'POST',
         headers: {
@@ -152,10 +198,13 @@ app.post('/register', async (req, res) => {
     }
 
     const u = auth.register(username, password, { email, tosAccepted });
-    await serverManager.startServer({ ownerId: username, ram: 2, onlineMode: false, name: `${username}'s Server`, software: 'Paper', version: '1.21.8' });
+    
+    await serverManager.startServer({ ownerId: username, ram: 2, onlineMode: false, name: `${username}'s Server`, software: 'Paper', version: '26.1.2', subdomain: username });
+    state.setRunning(username, true);
+
     const server = serverManager.getServer(username) || {};
     const loginResult = auth.login(username, password);
-    res.json({ ok: true, token: loginResult.token, user: { id: u.id, username: u.username, apiKey: u.apiKey }, apiKey: u.apiKey, server });
+    res.json({ ok: true, token: loginResult.token, user: { id: u.id, username: u.username, apiKey: u.apiKey }, apiKey: u.apiKey, server, state: state.getState(username) });
   } catch (e) {
     res.json({ ok: false, error: e.message });
   }
@@ -166,8 +215,11 @@ app.post('/login', async (req, res) => {
   if (!username || !password) return res.json({ ok: false, error: 'username & password required' });
   try {
     const r = auth.login(username, password);
-    const serverResult = await serverManager.startServer({ ownerId: username, ram: 2, onlineMode: false, name: `${username}'s Server`, software: 'Paper', version: '1.21.8' });
-    res.json({ ok: true, token: r.token, user: r.user, apiKey: r.user.apiKey, server: serverResult });
+    
+    const serverResult = await serverManager.startServer({ ownerId: username, ram: 2, onlineMode: false, name: `${username}'s Server`, software: 'Paper', version: '26.1.2', subdomain: username });
+    state.setRunning(username, true);
+
+    res.json({ ok: true, token: r.token, user: r.user, apiKey: r.user.apiKey, server: serverResult, state: state.getState(username) });
   } catch (e) {
     res.json({ ok: false, error: e.message });
   }
@@ -183,7 +235,7 @@ app.post('/share', authenticate, async (req, res) => {
     if (!s.sharedWith.includes(target)) s.sharedWith.push(target);
     if (!s.roles) s.roles = {};
     s.roles[target] = role || 'admin';
-    await serverManager.startServer({ ownerId: owner, ram: s.ramG || 2, sharedWith: s.sharedWith, onlineMode: s.onlineMode, plugins: s.plugins });
+    await serverManager.startServer({ ownerId: owner, ram: s.ramG || 2, sharedWith: s.sharedWith, onlineMode: s.onlineMode, plugins: s.plugins, subdomain: owner });
     res.json({ ok: true, roles: s.roles });
   } catch (e) {
     res.json({ ok: false, error: e.message });
@@ -195,107 +247,14 @@ app.get("/status", (req, res) => {
 });
 
 app.get("/server", (req, res) => {
-  const payload = getPayload(req);
+  const payload = auth.getPayload ? auth.getPayload(req) : null;
   const userId = (payload && (payload.username || payload.id)) || req.query.userId || "guest";
   const s = serverManager.getServer(userId);
-  res.json({ server: s, host: s && s.host, port: s && (s.tunnelPort || s.port) });
+  res.json({ server: s, host: s ? s.host : null, port: s ? s.tunnelPort : null, state: state.getState(userId) });
 });
 
-app.get('/join', async (req, res) => {
-  try {
-    const ownerId = 'public';
-    let server = serverManager.getServer(ownerId);
-    if (!server || !server.url) {
-      await serverManager.startServer({ ownerId, ram: 2, sharedWith: [], onlineMode: false });
-      server = serverManager.getServer(ownerId);
-    }
-    return res.json({
-      ok: true,
-      server,
-      connect: server.url ? server.domain : `localhost:${server.port}`,
-      publicTunnel: Boolean(server.url)
-    });
-  } catch (err) {
-    return res.json({ ok: true, server: serverManager.getServer('public') || null, connect: serverManager.getServer('public') ? `localhost:${serverManager.getServer('public').port}` : null, publicTunnel: false });
-  }
-});
-
-app.get("/logs", (req, res) => {
-  res.json({ logs: serverManager.getLogs() });
-});
-
-app.get('/public', (req, res) => {
-  const list = serverManager.getAllServers().map((s) => ({
-    owner: s.ownerId,
-    name: s.name,
-    domain: s.domain,
-    software: s.software,
-    version: s.version,
-    host: s.host,
-    port: s.tunnelPort || s.port,
-    onlineMode: s.onlineMode
-  }));
-  res.json({ ok: true, servers: list });
-});
-
-app.get('/servers', (req, res) => {
-  const list = serverManager.getAllServers().map((s) => ({
-    owner: s.ownerId,
-    name: s.name,
-    domain: s.domain,
-    software: s.software,
-    version: s.version,
-    host: s.host,
-    port: s.tunnelPort || s.port,
-    onlineMode: s.onlineMode
-  }));
-  res.json({ ok: true, servers: list });
-});
-
-app.post('/shortcut', authenticate, async (req, res) => {
-  const shortcutScript = path.join(__dirname, '..', 'scripts', 'create-shortcut.js');
-  const { url = 'http://localhost:3001', name = 'CraftHost', startup = false } = req.body || {};
-  try {
-    await new Promise((resolve, reject) => {
-      const proc = spawn('node', [shortcutScript, url, name, ...(startup ? ['--startup'] : [])], { shell: true });
-      let stderr = '';
-      proc.stderr.on('data', (data) => { stderr += data.toString(); });
-      proc.on('exit', (code) => {
-        if (code === 0) resolve();
-        else reject(new Error(stderr || `Shortcut script exited ${code}`));
-      });
-      proc.on('error', reject);
-    });
-    return res.json({ ok: true, message: 'Shortcut created' });
-  } catch (e) {
-    return res.json({ ok: false, error: e.message || 'Shortcut creation failed' });
-  }
-});
-
-const initialConfig = readConfig();
-if (initialConfig.NGROK_AUTHTOKEN) {
-  process.env.NGROK_AUTHTOKEN = initialConfig.NGROK_AUTHTOKEN;
-}
-if (initialConfig.CLOUDFLARE_TOKEN) {
-  process.env.CLOUDFLARE_TOKEN = initialConfig.CLOUDFLARE_TOKEN;
-}
-if (initialConfig.CLOUDFLARE_ZONE) {
-  process.env.CLOUDFLARE_ZONE = initialConfig.CLOUDFLARE_ZONE;
-}
-
-app.listen(3001, () => {
-  console.log("CraftHost API running on http://localhost:3001");
-  serverManager.startServer({ ownerId: 'public', ram: 2, sharedWith: [], onlineMode: false })
-    .then(() => console.log('Public server initialized'))
-    .catch((err) => console.warn('Public server failed to initialize', err.message || err));
-});
-
-app.post('/backup', authenticate, async (req, res) => {
-  try {
-    const owner = req.user.username;
-    const r = serverManager.backupInstance(owner);
-    res.json(r);
-  } catch (e) {
-    res.json({ ok: false, error: e.message });
-  }
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`CraftHost API is running on port ${PORT}`);
+  autoCreateDesktopShortcut();
 });
